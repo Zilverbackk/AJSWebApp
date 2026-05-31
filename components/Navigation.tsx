@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname } from 'next/navigation'
 import type { Role } from '@/lib/types'
 import { supabase } from '@/lib/supabase'
 
@@ -49,14 +49,12 @@ interface NavigationProps {
 
 export default function Navigation({ role, userName }: NavigationProps) {
   const pathname = usePathname()
-  const router = useRouter()
   const [mobileOpen, setMobileOpen] = useState(false)
   const navItems = getNavItems(role)
 
   const handleSignOut = async () => {
     await supabase.auth.signOut()
-    router.push('/login')
-    router.refresh()
+    window.location.href = '/login'
   }
 
   const isActive = (href: string) => {
