@@ -15,6 +15,7 @@ interface NavItem {
 const adminNav: NavItem[] = [
   { label: 'Dashboard', href: '/dashboard', icon: '⌂' },
   { label: 'Members', href: '/admin/members', icon: '👥' },
+  { label: 'Teams', href: '/admin/teams', icon: '🏆' },
   { label: 'Calendar', href: '/admin/calendar', icon: '📅' },
   { label: 'Check-in', href: '/admin/checkin', icon: '✅' },
 ]
@@ -22,11 +23,15 @@ const adminNav: NavItem[] = [
 const trainerNav: NavItem[] = [
   { label: 'Dashboard', href: '/dashboard', icon: '⌂' },
   { label: 'Athletes', href: '/trainer/athletes', icon: '🥋' },
+  { label: 'Teams', href: '/admin/teams', icon: '🏆' },
+  { label: 'Calendar', href: '/admin/calendar', icon: '📅' },
+  { label: 'Check-in', href: '/admin/checkin', icon: '✅' },
 ]
 
 const athleteNav: NavItem[] = [
   { label: 'Dashboard', href: '/dashboard', icon: '⌂' },
   { label: 'My Profile', href: '/athlete/profile', icon: '👤' },
+  { label: 'Calendar', href: '/athlete/calendar', icon: '📅' },
   { label: 'Check in', href: '/athlete/checkin', icon: '✅' },
   { label: 'Programs', href: '/athlete/programs', icon: '💪' },
 ]

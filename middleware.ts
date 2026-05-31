@@ -28,15 +28,27 @@ export async function middleware(req: NextRequest) {
   const role = profile?.role as string | undefined
   const path = req.nextUrl.pathname
 
+  // Routes trainers can access under /admin/*
+  const TRAINER_ALLOWED_ADMIN = ['/admin/calendar', '/admin/checkin', '/admin/teams']
+  const trainerAllowed = TRAINER_ALLOWED_ADMIN.some((prefix) => path.startsWith(prefix))
+
   // Enforce role-based access
-  if (path.startsWith('/admin') && role !== 'admin') {
-    return NextResponse.redirect(new URL('/dashboard', req.url))
+  if (path.startsWith('/admin')) {
+    if (role === 'admin') {
+      // full access
+    } else if (role === 'trainer' && trainerAllowed) {
+      // trainers can access calendar, checkin, teams (read/write enforced in app)
+    } else {
+      return NextResponse.redirect(new URL('/dashboard', req.url))
+    }
   }
 
   if (path.startsWith('/trainer') && !['admin', 'trainer'].includes(role ?? '')) {
     return NextResponse.redirect(new URL('/dashboard', req.url))
   }
 
+  // Athletes and trainers can access /athlete/* routes
+  // (e.g. a trainer browsing shouldn't land here, but athletes must be logged in)
   if (path.startsWith('/athlete') && !role) {
     return NextResponse.redirect(new URL('/login', req.url))
   }

@@ -11,27 +11,42 @@ export default async function AthleteCheckinPage() {
   const supabase = createServerClient()
   const now = new Date()
 
-  // Find active session (started ≤30min ago or currently running, and not yet ended)
-  const windowStart = new Date(now.getTime() - 30 * 60 * 1000).toISOString()
+  // Get the athlete's team IDs
+  const { data: teamRows } = await supabase
+    .from('team_members')
+    .select('team_id')
+    .eq('profile_id', profile.id)
+    .eq('role', 'athlete')
 
-  const { data: sessions } = await supabase
-    .from('sessions')
-    .select('id, title, starts_at, ends_at, location, session_type')
-    .lte('starts_at', now.toISOString())
-    .gte('ends_at', now.toISOString())
-    .order('starts_at')
-    .limit(3)
+  const myTeamIds = (teamRows ?? []).map((r: { team_id: string }) => r.team_id)
 
-  // Also find sessions starting in the next 30 min
-  const { data: upcomingSessions } = await supabase
-    .from('sessions')
-    .select('id, title, starts_at, ends_at, location, session_type')
-    .gt('starts_at', now.toISOString())
-    .lte('starts_at', new Date(now.getTime() + 30 * 60 * 1000).toISOString())
-    .order('starts_at')
-    .limit(3)
+  // Fetch currently active sessions (started and not yet ended)
+  const [activeRes, upcomingRes] = await Promise.all([
+    supabase
+      .from('sessions')
+      .select('id, title, starts_at, ends_at, location, session_type, team_id')
+      .lte('starts_at', now.toISOString())
+      .gte('ends_at', now.toISOString())
+      .order('starts_at')
+      .limit(10),
+    // Sessions starting in the next 30 min
+    supabase
+      .from('sessions')
+      .select('id, title, starts_at, ends_at, location, session_type, team_id')
+      .gt('starts_at', now.toISOString())
+      .lte('starts_at', new Date(now.getTime() + 30 * 60 * 1000).toISOString())
+      .order('starts_at')
+      .limit(10),
+  ])
 
-  const activeSessions = [...(sessions ?? []), ...(upcomingSessions ?? [])]
+  // Filter: show session if team_id is null (all-club) OR team_id is in athlete's teams
+  const filterForAthlete = (s: { team_id: string | null }) =>
+    !s.team_id || myTeamIds.includes(s.team_id)
+
+  const activeSessions = [
+    ...(activeRes.data ?? []).filter(filterForAthlete),
+    ...(upcomingRes.data ?? []).filter(filterForAthlete),
+  ]
 
   // Check if already checked in to any active session
   const activeSessionIds = activeSessions.map((s) => s.id)
@@ -48,15 +63,15 @@ export default async function AthleteCheckinPage() {
     alreadyCheckedIn = (existingCheckins ?? []).map((c: { session_id: string }) => c.session_id)
   }
 
-  // Next upcoming session (beyond the 30-min window)
+  // Next upcoming session for the athlete (beyond the 30-min window)
   const { data: nextSessionData } = await supabase
     .from('sessions')
-    .select('id, title, starts_at, location')
+    .select('id, title, starts_at, location, team_id')
     .gt('starts_at', new Date(now.getTime() + 30 * 60 * 1000).toISOString())
     .order('starts_at')
-    .limit(1)
+    .limit(20)  // fetch a few to filter
 
-  const nextSession = nextSessionData?.[0] ?? null
+  const nextSession = (nextSessionData ?? []).find(filterForAthlete) ?? null
 
   return (
     <AppLayout profile={profile}>
@@ -86,14 +101,10 @@ export default async function AthleteCheckinPage() {
                   <p className="font-medium text-gray-700 mt-1">{nextSession.title}</p>
                   <p className="mt-1">
                     {new Date(nextSession.starts_at).toLocaleDateString('en-GB', {
-                      weekday: 'long',
-                      day: 'numeric',
-                      month: 'long',
-                    })}{' '}
-                    at{' '}
+                      weekday: 'long', day: 'numeric', month: 'long',
+                    })}{' '}at{' '}
                     {new Date(nextSession.starts_at).toLocaleTimeString('en-GB', {
-                      hour: '2-digit',
-                      minute: '2-digit',
+                      hour: '2-digit', minute: '2-digit',
                     })}
                   </p>
                   {nextSession.location && (
@@ -101,7 +112,7 @@ export default async function AthleteCheckinPage() {
                   )}
                 </div>
               ) : (
-                <p className="mt-4 text-sm text-gray-400">No upcoming sessions scheduled.</p>
+                <p className="mt-4 text-sm text-gray-400">No upcoming sessions scheduled for your team.</p>
               )}
             </div>
           )}

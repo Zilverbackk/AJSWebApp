@@ -20,21 +20,23 @@ interface CheckinRecord {
 interface Props {
   initialCheckins: CheckinRecord[]
   todaySessions: Session[]
+  trainerTeamIds: string[]  // for trainers: their team IDs (to filter realtime events)
+  isAdmin: boolean
 }
 
-export default function CheckinLiveView({ initialCheckins, todaySessions }: Props) {
+export default function CheckinLiveView({ initialCheckins, todaySessions, trainerTeamIds, isAdmin }: Props) {
   const [checkins, setCheckins] = useState<CheckinRecord[]>(initialCheckins)
   const [newId, setNewId] = useState<string | null>(null)
 
+  const todaySessionIds = new Set(todaySessions.map((s) => s.id))
+
   useEffect(() => {
-    // Subscribe to new check-ins via Supabase Realtime
     const channel = supabase
       .channel('checkins-live')
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'check_ins' },
         async (payload) => {
-          // Fetch the full check-in with profile
           const { data } = await supabase
             .from('check_ins')
             .select('id, athlete_id, session_id, checked_in_at, profiles(full_name, belt_rank, avatar_url)')
@@ -42,11 +44,14 @@ export default function CheckinLiveView({ initialCheckins, todaySessions }: Prop
             .single()
 
           if (data) {
+            // For trainers: only add check-ins from their sessions
+            if (!isAdmin && data.session_id && !todaySessionIds.has(data.session_id)) return
+
             const record: CheckinRecord = {
-                ...data,
-                profiles: Array.isArray(data.profiles) ? data.profiles[0] ?? null : data.profiles,
-              }
-              setCheckins((prev) => [record, ...prev])
+              ...data,
+              profiles: Array.isArray(data.profiles) ? data.profiles[0] ?? null : data.profiles,
+            }
+            setCheckins((prev) => [record, ...prev])
             setNewId(data.id)
             setTimeout(() => setNewId(null), 3000)
           }
@@ -54,10 +59,8 @@ export default function CheckinLiveView({ initialCheckins, todaySessions }: Prop
       )
       .subscribe()
 
-    return () => {
-      supabase.removeChannel(channel)
-    }
-  }, [])
+    return () => { supabase.removeChannel(channel) }
+  }, [isAdmin, todaySessionIds])
 
   const SESSION_COLORS: Record<string, string> = {
     regular: 'bg-blue-100 text-blue-800',
@@ -78,9 +81,7 @@ export default function CheckinLiveView({ initialCheckins, todaySessions }: Prop
             <ul className="space-y-3">
               {todaySessions.map((s) => {
                 const now = new Date()
-                const start = new Date(s.starts_at)
-                const end = new Date(s.ends_at)
-                const isActive = now >= start && now <= end
+                const isActive = now >= new Date(s.starts_at) && now <= new Date(s.ends_at)
                 const sessionCheckins = checkins.filter((c) => c.session_id === s.id)
 
                 return (
@@ -93,13 +94,11 @@ export default function CheckinLiveView({ initialCheckins, todaySessions }: Prop
                           {new Date(s.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
                         </p>
                       </div>
-                      <div className="text-right">
+                      <div className="text-right flex flex-col items-end gap-1">
                         <span className={`belt-badge ${SESSION_COLORS[s.session_type] ?? ''} capitalize`}>
                           {s.session_type}
                         </span>
-                        {isActive && (
-                          <p className="text-xs text-green-600 font-medium mt-1">● Live</p>
-                        )}
+                        {isActive && <p className="text-xs text-green-600 font-medium">● Live</p>}
                       </div>
                     </div>
                     <p className="text-xs text-gray-400 mt-2">{sessionCheckins.length} checked in</p>
@@ -125,12 +124,7 @@ export default function CheckinLiveView({ initialCheckins, todaySessions }: Prop
             <ul className="space-y-2 max-h-[60vh] overflow-y-auto">
               {checkins.map((c) => {
                 const p = c.profiles
-                const initials = p?.full_name
-                  .split(' ')
-                  .map((n) => n[0])
-                  .join('')
-                  .toUpperCase()
-                  .slice(0, 2) ?? '?'
+                const initials = p?.full_name.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2) ?? '?'
 
                 return (
                   <li
@@ -145,20 +139,13 @@ export default function CheckinLiveView({ initialCheckins, todaySessions }: Prop
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-medium text-gray-900">{p?.full_name ?? 'Unknown'}</p>
                       {p?.belt_rank && (
-                        <span className={`belt-badge text-xs ${getBeltColor(p.belt_rank)}`}>
-                          {p.belt_rank}
-                        </span>
+                        <span className={`belt-badge text-xs ${getBeltColor(p.belt_rank)}`}>{p.belt_rank}</span>
                       )}
                     </div>
                     <span className="text-xs text-gray-400 flex-shrink-0">
-                      {new Date(c.checked_in_at).toLocaleTimeString('en-GB', {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
+                      {new Date(c.checked_in_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
                     </span>
-                    {newId === c.id && (
-                      <span className="text-xs text-green-600 font-medium">New ✓</span>
-                    )}
+                    {newId === c.id && <span className="text-xs text-green-600 font-medium">New ✓</span>}
                   </li>
                 )
               })}

@@ -147,6 +147,41 @@ create policy "Trainers and admins can view all logs" on program_logs
 alter table sessions add column if not exists recurrence_group_id uuid;
 create index if not exists sessions_recurrence_group_id_idx on sessions(recurrence_group_id);
 
+-- M002: Teams
+create table if not exists teams (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  description text,
+  created_by uuid references profiles(id) on delete set null,
+  created_at timestamptz default now()
+);
+
+create table if not exists team_members (
+  id uuid primary key default gen_random_uuid(),
+  team_id uuid references teams(id) on delete cascade not null,
+  profile_id uuid references profiles(id) on delete cascade not null,
+  role text not null check (role in ('athlete', 'trainer')),
+  joined_at timestamptz default now(),
+  unique(team_id, profile_id)
+);
+
+alter table sessions add column if not exists team_id uuid references teams(id) on delete set null;
+create index if not exists sessions_team_id_idx on sessions(team_id);
+
+-- RLS for teams (all authenticated can read; only admin can write)
+alter table teams enable row level security;
+alter table team_members enable row level security;
+
+create policy "Authenticated users can view teams" on teams
+  for select using (auth.uid() is not null);
+create policy "Admins can manage teams" on teams
+  for all using (get_my_role() = 'admin');
+
+create policy "Authenticated users can view team members" on team_members
+  for select using (auth.uid() is not null);
+create policy "Admins can manage team members" on team_members
+  for all using (get_my_role() = 'admin');
+
 -- ─── SEED: TEST USERS ────────────────────────────────────────
 -- After running this schema, create 3 users in Supabase Auth
 -- (Authentication → Users → Invite user), then insert matching

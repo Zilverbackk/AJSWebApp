@@ -1,17 +1,16 @@
 import { redirect } from 'next/navigation'
 import { getCurrentProfile, createServerClient } from '@/lib/supabase-server'
 import AppLayout from '@/components/AppLayout'
-import CalendarClient from './CalendarClient'
+import CalendarClient from '@/app/admin/calendar/CalendarClient'
 import type { Session, Team } from '@/lib/types'
 
-export default async function CalendarPage({
+export default async function AthleteCalendarPage({
   searchParams,
 }: {
   searchParams: { year?: string; month?: string }
 }) {
   const profile = await getCurrentProfile()
   if (!profile) redirect('/login')
-  if (profile.role !== 'admin' && profile.role !== 'trainer') redirect('/dashboard')
 
   const now = new Date()
   const year = parseInt(searchParams.year ?? String(now.getFullYear()))
@@ -22,7 +21,17 @@ export default async function CalendarPage({
 
   const supabase = createServerClient()
 
-  const [sessionsRes, teamsRes, userTeamsRes] = await Promise.all([
+  // Get the athlete's team IDs
+  const { data: teamRows } = await supabase
+    .from('team_members')
+    .select('team_id')
+    .eq('profile_id', profile.id)
+    .eq('role', 'athlete')
+
+  const myTeamIds = (teamRows ?? []).map((r: { team_id: string }) => r.team_id)
+
+  // Fetch all sessions in the month, then filter to athlete's teams + untagged
+  const [sessionsRes, teamsRes] = await Promise.all([
     supabase
       .from('sessions')
       .select('*')
@@ -33,31 +42,24 @@ export default async function CalendarPage({
       .from('teams')
       .select('id, name, description, created_by, created_at')
       .order('name'),
-    // For trainers: get their team IDs to know which sessions are "theirs"
-    profile.role === 'trainer'
-      ? supabase
-          .from('team_members')
-          .select('team_id')
-          .eq('profile_id', profile.id)
-          .eq('role', 'trainer')
-      : Promise.resolve({ data: [] }),
   ])
 
-  const userTeamIds = (userTeamsRes.data ?? []).map(
-    (r: { team_id: string }) => r.team_id
+  const allSessions = (sessionsRes.data ?? []) as Session[]
+  const sessions = allSessions.filter(
+    (s) => !s.team_id || myTeamIds.includes(s.team_id)
   )
 
   return (
     <AppLayout profile={profile}>
       <div className="p-6">
         <CalendarClient
-          sessions={(sessionsRes.data ?? []) as Session[]}
+          sessions={sessions}
           teams={(teamsRes.data ?? []) as Team[]}
           year={year}
           month={month}
-          canEdit={true}
+          canEdit={false}
           userRole={profile.role}
-          userTeamIds={userTeamIds}
+          userTeamIds={myTeamIds}
         />
       </div>
     </AppLayout>
