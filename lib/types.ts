@@ -37,6 +37,7 @@ export interface Session {
   location: string | null
   created_by: string | null
   created_at: string
+  recurrence_group_id: string | null
 }
 
 export interface CheckIn {

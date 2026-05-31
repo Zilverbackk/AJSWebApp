@@ -140,6 +140,13 @@ create policy "Trainers and admins can view all logs" on program_logs
 --   File size limit: 5MB
 --   Allowed MIME types: image/jpeg, image/png, image/webp
 
+-- ─── MIGRATIONS ──────────────────────────────────────────────
+-- Run these if you already applied the original schema above.
+
+-- M001: Recurring sessions support
+alter table sessions add column if not exists recurrence_group_id uuid;
+create index if not exists sessions_recurrence_group_id_idx on sessions(recurrence_group_id);
+
 -- ─── SEED: TEST USERS ────────────────────────────────────────
 -- After running this schema, create 3 users in Supabase Auth
 -- (Authentication → Users → Invite user), then insert matching

@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import type { Session, SessionType } from '@/lib/types'
 
+// ─── Constants ───────────────────────────────────────────────────────────────
+
 const SESSION_COLORS: Record<SessionType, string> = {
   regular: 'bg-blue-100 text-blue-800',
   elite: 'bg-purple-100 text-purple-800',
@@ -17,6 +19,47 @@ const MONTH_NAMES = [
   'July', 'August', 'September', 'October', 'November', 'December',
 ]
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Format a Date as a datetime-local input value (YYYY-MM-DDTHH:mm) */
+function toDatetimeLocal(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/** Add n days to a Date, return new Date */
+function addDays(d: Date, n: number): Date {
+  const r = new Date(d)
+  r.setDate(r.getDate() + n)
+  return r
+}
+
+/** Build the last date of a recurrence series (first date + (n-1) * 7 days) */
+function seriesLastDate(firstStart: string, weeks: number): string {
+  const last = addDays(new Date(firstStart), (weeks - 1) * 7)
+  return last.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+}
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface SessionForm {
+  title: string
+  description: string
+  session_type: SessionType
+  starts_at: string
+  ends_at: string
+  location: string
+}
+
+type ModalState =
+  | { kind: 'none' }
+  | { kind: 'detail'; session: Session }
+  | { kind: 'create'; defaultDate: string }
+  | { kind: 'edit'; session: Session; scope: 'single' | 'series' }
+  | { kind: 'delete-confirm'; session: Session; scope: 'single' | 'series'; seriesCount: number }
+
+// ─── Component ───────────────────────────────────────────────────────────────
+
 interface Props {
   sessions: Session[]
   year: number
@@ -24,32 +67,46 @@ interface Props {
   canEdit: boolean
 }
 
-type ModalMode = 'view' | 'create'
-
 export default function CalendarClient({ sessions, year, month, canEdit }: Props) {
   const router = useRouter()
-  const [selectedSession, setSelectedSession] = useState<Session | null>(null)
-  const [showCreateModal, setShowCreateModal] = useState(false)
-  const [createDate, setCreateDate] = useState('')
+  const [modal, setModal] = useState<ModalState>({ kind: 'none' })
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
 
-  const [newSession, setNewSession] = useState({
+  // Create form state
+  const [createForm, setCreateForm] = useState<SessionForm>({
     title: '',
     description: '',
-    session_type: 'regular' as SessionType,
+    session_type: 'regular',
+    starts_at: '',
+    ends_at: '',
+    location: '',
+  })
+  const [repeatWeekly, setRepeatWeekly] = useState(false)
+  const [repeatWeeks, setRepeatWeeks] = useState(8)
+
+  // Edit form state
+  const [editForm, setEditForm] = useState<SessionForm>({
+    title: '',
+    description: '',
+    session_type: 'regular',
     starts_at: '',
     ends_at: '',
     location: '',
   })
 
-  // Build calendar grid
-  const firstDay = new Date(year, month - 1, 1)
-  const lastDay = new Date(year, month, 0)
-  const startDow = firstDay.getDay() // 0=Sun
-  const totalDays = lastDay.getDate()
+  // ─── Calendar grid ─────────────────────────────────────────────────────────
 
-  // Group sessions by day
+  const firstDay = new Date(year, month - 1, 1)
+  const totalDays = new Date(year, month, 0).getDate()
+  const startDow = firstDay.getDay()
+
+  const cells: (number | null)[] = [
+    ...Array(startDow).fill(null),
+    ...Array.from({ length: totalDays }, (_, i) => i + 1),
+  ]
+  while (cells.length % 7 !== 0) cells.push(null)
+
   const sessionsByDay: Record<number, Session[]> = {}
   sessions.forEach((s) => {
     const d = new Date(s.starts_at).getDate()
@@ -61,32 +118,92 @@ export default function CalendarClient({ sessions, year, month, canEdit }: Props
   const prevYear = month === 1 ? year - 1 : year
   const nextMonth = month === 12 ? 1 : month + 1
   const nextYear = month === 12 ? year + 1 : year
+  const today = new Date()
+
+  // ─── Open create modal ─────────────────────────────────────────────────────
 
   const openCreate = (day: number) => {
     const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-    setCreateDate(dateStr)
-    setNewSession((prev) => ({
-      ...prev,
+    setCreateForm({
+      title: '',
+      description: '',
+      session_type: 'regular',
       starts_at: `${dateStr}T18:00`,
       ends_at: `${dateStr}T20:00`,
-    }))
-    setShowCreateModal(true)
+      location: '',
+    })
+    setRepeatWeekly(false)
+    setRepeatWeeks(8)
     setFormError(null)
+    setModal({ kind: 'create', defaultDate: dateStr })
   }
 
-  const handleCreateSession = async (e: React.FormEvent) => {
+  // ─── Open edit modal ───────────────────────────────────────────────────────
+
+  const openEdit = (session: Session, scope: 'single' | 'series') => {
+    setEditForm({
+      title: session.title,
+      description: session.description ?? '',
+      session_type: session.session_type,
+      starts_at: toDatetimeLocal(new Date(session.starts_at)),
+      ends_at: toDatetimeLocal(new Date(session.ends_at)),
+      location: session.location ?? '',
+    })
+    setFormError(null)
+    setModal({ kind: 'edit', session, scope })
+  }
+
+  // ─── Open delete confirm ───────────────────────────────────────────────────
+
+  const openDeleteConfirm = async (session: Session, scope: 'single' | 'series') => {
+    let seriesCount = 1
+    if (scope === 'series' && session.recurrence_group_id) {
+      const { count } = await supabase
+        .from('sessions')
+        .select('id', { count: 'exact', head: true })
+        .eq('recurrence_group_id', session.recurrence_group_id)
+      seriesCount = count ?? 1
+    }
+    setModal({ kind: 'delete-confirm', session, scope, seriesCount })
+  }
+
+  // ─── Create handler ────────────────────────────────────────────────────────
+
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
     setSaving(true)
     setFormError(null)
 
-    const { error } = await supabase.from('sessions').insert({
-      title: newSession.title,
-      description: newSession.description || null,
-      session_type: newSession.session_type,
-      starts_at: new Date(newSession.starts_at).toISOString(),
-      ends_at: new Date(newSession.ends_at).toISOString(),
-      location: newSession.location || null,
+    const startDate = new Date(createForm.starts_at)
+    const endDate = new Date(createForm.ends_at)
+
+    if (endDate <= startDate) {
+      setFormError('End time must be after start time.')
+      setSaving(false)
+      return
+    }
+
+    const durationMs = endDate.getTime() - startDate.getTime()
+    const recurrence_group_id = repeatWeekly && repeatWeeks > 1
+      ? crypto.randomUUID()
+      : null
+
+    const weeks = repeatWeekly ? Math.max(1, repeatWeeks) : 1
+    const rows = Array.from({ length: weeks }, (_, i) => {
+      const s = addDays(startDate, i * 7)
+      const e = new Date(s.getTime() + durationMs)
+      return {
+        title: createForm.title,
+        description: createForm.description || null,
+        session_type: createForm.session_type,
+        starts_at: s.toISOString(),
+        ends_at: e.toISOString(),
+        location: createForm.location || null,
+        recurrence_group_id,
+      }
     })
+
+    const { error } = await supabase.from('sessions').insert(rows)
 
     if (error) {
       setFormError(error.message)
@@ -94,20 +211,119 @@ export default function CalendarClient({ sessions, year, month, canEdit }: Props
       return
     }
 
-    setShowCreateModal(false)
-    setNewSession({ title: '', description: '', session_type: 'regular', starts_at: '', ends_at: '', location: '' })
+    setModal({ kind: 'none' })
     router.refresh()
     setSaving(false)
   }
 
-  const cells: (number | null)[] = [
-    ...Array(startDow).fill(null),
-    ...Array.from({ length: totalDays }, (_, i) => i + 1),
-  ]
-  // Pad to complete last row
-  while (cells.length % 7 !== 0) cells.push(null)
+  // ─── Edit handler ──────────────────────────────────────────────────────────
 
-  const today = new Date()
+  const handleEdit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (modal.kind !== 'edit') return
+    setSaving(true)
+    setFormError(null)
+
+    const { session, scope } = modal
+    const newStart = new Date(editForm.starts_at)
+    const newEnd = new Date(editForm.ends_at)
+
+    if (newEnd <= newStart) {
+      setFormError('End time must be after start time.')
+      setSaving(false)
+      return
+    }
+
+    const sharedFields = {
+      title: editForm.title,
+      description: editForm.description || null,
+      session_type: editForm.session_type,
+      location: editForm.location || null,
+    }
+
+    if (scope === 'single' || !session.recurrence_group_id) {
+      // Update just this session
+      const { error } = await supabase
+        .from('sessions')
+        .update({ ...sharedFields, starts_at: newStart.toISOString(), ends_at: newEnd.toISOString() })
+        .eq('id', session.id)
+
+      if (error) { setFormError(error.message); setSaving(false); return }
+    } else {
+      // Fetch all sessions in the series
+      const { data: seriesSessions, error: fetchError } = await supabase
+        .from('sessions')
+        .select('id, starts_at, ends_at')
+        .eq('recurrence_group_id', session.recurrence_group_id)
+        .order('starts_at')
+
+      if (fetchError) { setFormError(fetchError.message); setSaving(false); return }
+
+      // New duration from edit form
+      const newDurationMs = newEnd.getTime() - newStart.getTime()
+      const newStartHour = newStart.getHours()
+      const newStartMin = newStart.getMinutes()
+
+      // Update each session: keep its date, apply new start time, derive end from duration
+      const updates = (seriesSessions ?? []).map((s) => {
+        const existingStart = new Date(s.starts_at)
+        const updatedStart = new Date(existingStart)
+        updatedStart.setHours(newStartHour, newStartMin, 0, 0)
+        const updatedEnd = new Date(updatedStart.getTime() + newDurationMs)
+        return { id: s.id, starts_at: updatedStart.toISOString(), ends_at: updatedEnd.toISOString() }
+      })
+
+      // Apply shared text fields to all, then times individually
+      const { error: textError } = await supabase
+        .from('sessions')
+        .update(sharedFields)
+        .eq('recurrence_group_id', session.recurrence_group_id)
+
+      if (textError) { setFormError(textError.message); setSaving(false); return }
+
+      // Update times row by row (Supabase doesn't support per-row bulk updates natively)
+      for (const u of updates) {
+        const { error } = await supabase
+          .from('sessions')
+          .update({ starts_at: u.starts_at, ends_at: u.ends_at })
+          .eq('id', u.id)
+        if (error) { setFormError(error.message); setSaving(false); return }
+      }
+    }
+
+    setModal({ kind: 'none' })
+    router.refresh()
+    setSaving(false)
+  }
+
+  // ─── Delete handler ────────────────────────────────────────────────────────
+
+  const handleDelete = async () => {
+    if (modal.kind !== 'delete-confirm') return
+    setSaving(true)
+
+    const { session, scope } = modal
+
+    if (scope === 'series' && session.recurrence_group_id) {
+      const { error } = await supabase
+        .from('sessions')
+        .delete()
+        .eq('recurrence_group_id', session.recurrence_group_id)
+      if (error) { setFormError(error.message); setSaving(false); return }
+    } else {
+      const { error } = await supabase
+        .from('sessions')
+        .delete()
+        .eq('id', session.id)
+      if (error) { setFormError(error.message); setSaving(false); return }
+    }
+
+    setModal({ kind: 'none' })
+    router.refresh()
+    setSaving(false)
+  }
+
+  // ─── Render ───────────────────────────────────────────────────────────────
 
   return (
     <div>
@@ -120,7 +336,7 @@ export default function CalendarClient({ sessions, year, month, canEdit }: Props
           >
             ‹
           </button>
-          <h1 className="text-xl font-bold text-gray-900 min-w-40 text-center">
+          <h1 className="text-xl font-bold text-gray-900 w-44 text-center">
             {MONTH_NAMES[month - 1]} {year}
           </h1>
           <button
@@ -142,20 +358,17 @@ export default function CalendarClient({ sessions, year, month, canEdit }: Props
         {(Object.entries(SESSION_COLORS) as [SessionType, string][]).map(([type, color]) => (
           <span key={type} className={`belt-badge ${color} capitalize`}>{type}</span>
         ))}
+        <span className="belt-badge bg-amber-50 text-amber-700 border border-amber-200">↺ recurring</span>
       </div>
 
       {/* Calendar grid */}
       <div className="card overflow-hidden">
-        {/* Day headers */}
         <div className="grid grid-cols-7 border-b border-gray-200">
           {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => (
-            <div key={d} className="py-2 text-center text-xs font-medium text-gray-500 uppercase">
-              {d}
-            </div>
+            <div key={d} className="py-2 text-center text-xs font-medium text-gray-500 uppercase">{d}</div>
           ))}
         </div>
 
-        {/* Weeks */}
         {Array.from({ length: cells.length / 7 }, (_, weekIdx) => (
           <div key={weekIdx} className="grid grid-cols-7 border-b border-gray-100 last:border-0">
             {cells.slice(weekIdx * 7, weekIdx * 7 + 7).map((day, i) => {
@@ -176,24 +389,22 @@ export default function CalendarClient({ sessions, year, month, canEdit }: Props
                 >
                   {day && (
                     <>
-                      <p
-                        className={`text-xs font-medium mb-1 w-5 h-5 flex items-center justify-center rounded-full ${
-                          isToday ? 'bg-blue-600 text-white' : 'text-gray-600'
-                        }`}
-                      >
+                      <p className={`text-xs font-medium mb-1 w-5 h-5 flex items-center justify-center rounded-full ${
+                        isToday ? 'bg-blue-600 text-white' : 'text-gray-600'
+                      }`}>
                         {day}
                       </p>
                       <div className="space-y-0.5">
                         {daySessions.slice(0, 3).map((s) => (
                           <button
                             key={s.id}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setSelectedSession(s)
-                            }}
-                            className={`w-full text-left text-xs px-1.5 py-0.5 rounded truncate ${SESSION_COLORS[s.session_type]}`}
+                            onClick={(e) => { e.stopPropagation(); setModal({ kind: 'detail', session: s }) }}
+                            className={`w-full text-left text-xs px-1.5 py-0.5 rounded truncate ${SESSION_COLORS[s.session_type]} flex items-center gap-1`}
                           >
-                            {new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} {s.title}
+                            {s.recurrence_group_id && <span className="flex-shrink-0 opacity-60">↺</span>}
+                            <span className="truncate">
+                              {new Date(s.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} {s.title}
+                            </span>
                           </button>
                         ))}
                         {daySessions.length > 3 && (
@@ -209,110 +420,294 @@ export default function CalendarClient({ sessions, year, month, canEdit }: Props
         ))}
       </div>
 
-      {/* Session detail modal */}
-      {selectedSession && (
-        <Modal onClose={() => setSelectedSession(null)}>
-          <h2 className="text-lg font-semibold text-gray-900 mb-1">{selectedSession.title}</h2>
-          <p className="text-sm text-gray-500 mb-4">
-            {new Date(selectedSession.starts_at).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })},{' '}
-            {new Date(selectedSession.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} –{' '}
-            {new Date(selectedSession.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-          </p>
-          <span className={`belt-badge ${SESSION_COLORS[selectedSession.session_type]} capitalize mb-3 inline-block`}>
-            {selectedSession.session_type}
-          </span>
-          {selectedSession.location && (
-            <p className="text-sm text-gray-600 mt-2">📍 {selectedSession.location}</p>
-          )}
-          {selectedSession.description && (
-            <p className="text-sm text-gray-600 mt-3 whitespace-pre-wrap">{selectedSession.description}</p>
-          )}
+      {/* ── Detail modal ── */}
+      {modal.kind === 'detail' && (
+        <Modal onClose={() => setModal({ kind: 'none' })}>
+          <div className="space-y-3">
+            <div>
+              <div className="flex items-center gap-2 flex-wrap mb-1">
+                <h2 className="text-lg font-semibold text-gray-900">{modal.session.title}</h2>
+                <span className={`belt-badge ${SESSION_COLORS[modal.session.session_type]} capitalize`}>
+                  {modal.session.session_type}
+                </span>
+                {modal.session.recurrence_group_id && (
+                  <span className="belt-badge bg-amber-50 text-amber-700 border border-amber-200">↺ recurring</span>
+                )}
+              </div>
+              <p className="text-sm text-gray-500">
+                {new Date(modal.session.starts_at).toLocaleDateString('en-GB', {
+                  weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+                })},{' '}
+                {new Date(modal.session.starts_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                {' – '}
+                {new Date(modal.session.ends_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+              </p>
+              {modal.session.location && (
+                <p className="text-sm text-gray-500 mt-1">📍 {modal.session.location}</p>
+              )}
+              {modal.session.description && (
+                <p className="text-sm text-gray-600 mt-2 whitespace-pre-wrap">{modal.session.description}</p>
+              )}
+            </div>
+
+            {canEdit && (
+              <div className="border-t border-gray-100 pt-3 space-y-2">
+                {/* Edit options */}
+                <div>
+                  <p className="text-xs font-medium text-gray-500 uppercase mb-1.5">Edit</p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => openEdit(modal.session, 'single')}
+                      className="btn-secondary text-xs py-1.5 px-3"
+                    >
+                      This session
+                    </button>
+                    {modal.session.recurrence_group_id && (
+                      <button
+                        onClick={() => openEdit(modal.session, 'series')}
+                        className="btn-secondary text-xs py-1.5 px-3"
+                      >
+                        Whole series ↺
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {/* Delete options */}
+                <div>
+                  <p className="text-xs font-medium text-gray-500 uppercase mb-1.5">Delete</p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => openDeleteConfirm(modal.session, 'single')}
+                      className="text-xs py-1.5 px-3 rounded-md border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
+                    >
+                      This session
+                    </button>
+                    {modal.session.recurrence_group_id && (
+                      <button
+                        onClick={() => openDeleteConfirm(modal.session, 'series')}
+                        className="text-xs py-1.5 px-3 rounded-md border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
+                      >
+                        Whole series ↺
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
         </Modal>
       )}
 
-      {/* Create session modal */}
-      {showCreateModal && (
-        <Modal onClose={() => setShowCreateModal(false)}>
+      {/* ── Create modal ── */}
+      {modal.kind === 'create' && (
+        <Modal onClose={() => setModal({ kind: 'none' })}>
           <h2 className="text-lg font-semibold text-gray-900 mb-5">New session</h2>
-          <form onSubmit={handleCreateSession} className="space-y-4">
-            <div>
-              <label className="label">Title *</label>
-              <input
-                required
-                value={newSession.title}
-                onChange={(e) => setNewSession((p) => ({ ...p, title: e.target.value }))}
-                className="input"
-                placeholder="Randori training"
-              />
-            </div>
-            <div>
-              <label className="label">Type</label>
-              <select
-                value={newSession.session_type}
-                onChange={(e) => setNewSession((p) => ({ ...p, session_type: e.target.value as SessionType }))}
-                className="input"
-              >
-                <option value="regular">Regular</option>
-                <option value="elite">Elite</option>
-                <option value="strength">Strength</option>
-                <option value="competition">Competition</option>
-              </select>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="label">Start *</label>
+          <form onSubmit={handleCreate} className="space-y-4">
+            <SessionFormFields
+              form={createForm}
+              onChange={(k, v) => setCreateForm((p) => ({ ...p, [k]: v }))}
+            />
+
+            {/* Repeat section */}
+            <div className="border-t border-gray-100 pt-4 space-y-3">
+              <label className="flex items-center gap-2.5 cursor-pointer select-none">
                 <input
-                  required
-                  type="datetime-local"
-                  value={newSession.starts_at}
-                  onChange={(e) => setNewSession((p) => ({ ...p, starts_at: e.target.value }))}
-                  className="input"
+                  type="checkbox"
+                  checked={repeatWeekly}
+                  onChange={(e) => setRepeatWeekly(e.target.checked)}
+                  className="h-4 w-4 rounded border-gray-300 text-blue-600"
                 />
-              </div>
-              <div>
-                <label className="label">End *</label>
-                <input
-                  required
-                  type="datetime-local"
-                  value={newSession.ends_at}
-                  onChange={(e) => setNewSession((p) => ({ ...p, ends_at: e.target.value }))}
-                  className="input"
-                />
-              </div>
+                <span className="text-sm font-medium text-gray-700">Repeat weekly</span>
+              </label>
+
+              {repeatWeekly && (
+                <div className="pl-6 space-y-2">
+                  <div className="flex items-center gap-3">
+                    <label className="text-sm text-gray-600 whitespace-nowrap">For</label>
+                    <input
+                      type="number"
+                      min={2}
+                      max={52}
+                      value={repeatWeeks}
+                      onChange={(e) => setRepeatWeeks(Math.max(2, Math.min(52, parseInt(e.target.value) || 2)))}
+                      className="input w-20"
+                    />
+                    <span className="text-sm text-gray-600">weeks</span>
+                  </div>
+                  {createForm.starts_at && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2.5 py-1.5">
+                      Creates {repeatWeeks} sessions —{' '}
+                      first {new Date(createForm.starts_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })},{' '}
+                      last {seriesLastDate(createForm.starts_at, repeatWeeks)}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
-            <div>
-              <label className="label">Location</label>
-              <input
-                value={newSession.location}
-                onChange={(e) => setNewSession((p) => ({ ...p, location: e.target.value }))}
-                className="input"
-                placeholder="Main dojo"
-              />
-            </div>
-            <div>
-              <label className="label">Description</label>
-              <textarea
-                value={newSession.description}
-                onChange={(e) => setNewSession((p) => ({ ...p, description: e.target.value }))}
-                className="input"
-                rows={2}
-                placeholder="Optional notes for athletes"
-              />
-            </div>
-            {formError && (
-              <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{formError}</p>
-            )}
+
+            {formError && <ErrorMsg msg={formError} />}
+
             <div className="flex gap-3">
               <button type="submit" disabled={saving} className="btn-primary">
-                {saving ? 'Saving…' : 'Create session'}
+                {saving
+                  ? 'Saving…'
+                  : repeatWeekly
+                    ? `Create ${repeatWeeks} sessions`
+                    : 'Create session'}
               </button>
-              <button type="button" onClick={() => setShowCreateModal(false)} className="btn-secondary">
+              <button type="button" onClick={() => setModal({ kind: 'none' })} className="btn-secondary">
                 Cancel
               </button>
             </div>
           </form>
         </Modal>
       )}
+
+      {/* ── Edit modal ── */}
+      {modal.kind === 'edit' && (
+        <Modal onClose={() => setModal({ kind: 'none' })}>
+          <h2 className="text-lg font-semibold text-gray-900 mb-1">Edit session</h2>
+          {modal.scope === 'series' && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-2.5 py-1.5 mb-4">
+              Editing whole series — changes apply to all sessions in this recurring block. Each session keeps its own date; only the time and details are updated.
+            </p>
+          )}
+          <form onSubmit={handleEdit} className="space-y-4 mt-4">
+            <SessionFormFields
+              form={editForm}
+              onChange={(k, v) => setEditForm((p) => ({ ...p, [k]: v }))}
+            />
+            {formError && <ErrorMsg msg={formError} />}
+            <div className="flex gap-3">
+              <button type="submit" disabled={saving} className="btn-primary">
+                {saving ? 'Saving…' : modal.scope === 'series' ? 'Save whole series' : 'Save session'}
+              </button>
+              <button type="button" onClick={() => setModal({ kind: 'none' })} className="btn-secondary">
+                Cancel
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+
+      {/* ── Delete confirm modal ── */}
+      {modal.kind === 'delete-confirm' && (
+        <Modal onClose={() => setModal({ kind: 'none' })}>
+          <div className="space-y-4">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900 mb-1">
+                {modal.scope === 'series' ? 'Delete whole series?' : 'Delete this session?'}
+              </h2>
+              <p className="text-sm text-gray-600">
+                {modal.scope === 'series'
+                  ? <>This will permanently delete <strong>{modal.seriesCount} session{modal.seriesCount !== 1 ? 's' : ''}</strong> in the series "{modal.session.title}". This cannot be undone.</>
+                  : <>This will permanently delete the session "<strong>{modal.session.title}</strong>" on{' '}
+                    {new Date(modal.session.starts_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}. This cannot be undone.</>
+                }
+              </p>
+            </div>
+            {formError && <ErrorMsg msg={formError} />}
+            <div className="flex gap-3">
+              <button
+                onClick={handleDelete}
+                disabled={saving}
+                className="btn-danger"
+              >
+                {saving
+                  ? 'Deleting…'
+                  : modal.scope === 'series'
+                    ? `Delete ${modal.seriesCount} session${modal.seriesCount !== 1 ? 's' : ''}`
+                    : 'Delete session'}
+              </button>
+              <button
+                onClick={() => setModal({ kind: 'none' })}
+                className="btn-secondary"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  )
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function SessionFormFields({
+  form,
+  onChange,
+}: {
+  form: SessionForm
+  onChange: (key: keyof SessionForm, value: string) => void
+}) {
+  return (
+    <div className="space-y-3">
+      <div>
+        <label className="label">Title *</label>
+        <input
+          required
+          value={form.title}
+          onChange={(e) => onChange('title', e.target.value)}
+          className="input"
+          placeholder="Randori training"
+        />
+      </div>
+      <div>
+        <label className="label">Type</label>
+        <select
+          value={form.session_type}
+          onChange={(e) => onChange('session_type', e.target.value)}
+          className="input"
+        >
+          <option value="regular">Regular</option>
+          <option value="elite">Elite</option>
+          <option value="strength">Strength</option>
+          <option value="competition">Competition</option>
+        </select>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="label">Start *</label>
+          <input
+            required
+            type="datetime-local"
+            value={form.starts_at}
+            onChange={(e) => onChange('starts_at', e.target.value)}
+            className="input"
+          />
+        </div>
+        <div>
+          <label className="label">End *</label>
+          <input
+            required
+            type="datetime-local"
+            value={form.ends_at}
+            onChange={(e) => onChange('ends_at', e.target.value)}
+            className="input"
+          />
+        </div>
+      </div>
+      <div>
+        <label className="label">Location</label>
+        <input
+          value={form.location}
+          onChange={(e) => onChange('location', e.target.value)}
+          className="input"
+          placeholder="Main dojo"
+        />
+      </div>
+      <div>
+        <label className="label">Description</label>
+        <textarea
+          value={form.description}
+          onChange={(e) => onChange('description', e.target.value)}
+          className="input"
+          rows={2}
+          placeholder="Optional notes for athletes"
+        />
+      </div>
     </div>
   )
 }
@@ -325,11 +720,18 @@ function Modal({ children, onClose }: { children: React.ReactNode; onClose: () =
         <button
           onClick={onClose}
           className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 text-xl leading-none"
+          aria-label="Close"
         >
           ×
         </button>
         {children}
       </div>
     </div>
+  )
+}
+
+function ErrorMsg({ msg }: { msg: string }) {
+  return (
+    <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">{msg}</p>
   )
 }
