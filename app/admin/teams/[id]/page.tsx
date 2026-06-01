@@ -29,7 +29,16 @@ export default async function TeamDetailPage({ params }: { params: { id: string 
   if (!teamRes.data) notFound()
 
   const team = teamRes.data as Team
-  const members = (membersRes.data ?? []) as MemberWithProfile[]
+
+  // Supabase returns joined relations as arrays — normalize profiles to a single object
+  const members: MemberWithProfile[] = (membersRes.data ?? []).map((m) => ({
+    id: m.id,
+    team_id: m.team_id,
+    profile_id: m.profile_id,
+    role: m.role,
+    joined_at: m.joined_at,
+    profiles: Array.isArray(m.profiles) ? m.profiles[0] : m.profiles,
+  }))
 
   const athletes = members.filter((m) => m.role === 'athlete')
   const trainers = members.filter((m) => m.role === 'trainer')
